@@ -143,6 +143,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+env5080/
+envL4/
 
 # Spyder project settings
 .spyderproject
@@ -208,3 +210,6 @@ __marimo__/
 
 #model
 model/
+
+
+yolo11n-pose.pt
