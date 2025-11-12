@@ -28,7 +28,7 @@ pip install typing-extensions==4.12.2
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 
 # 其他依賴（YOLO 與常用）
-pip install ultralytics opencv-python numpy pillow av requests tqdm psutil pyinstaller   
+pip install ultralytics opencv-python numpy pillow av requests tqdm psutil pyinstaller scikit-image
 
 --------------------------------------------------------------------------------------
 
@@ -47,4 +47,4 @@ python -m pip install -U pip setuptools wheel
 pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
 # 其他依賴（與開發機一致，便於行為對齊）
-pip install ultralytics opencv-python numpy pillow av requests tqdm psutil pyinstaller   
+pip install ultralytics opencv-python numpy pillow av requests tqdm psutil pyinstaller scikit-image   
