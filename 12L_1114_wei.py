@@ -17,18 +17,6 @@ import numpy as np
 from collections import deque
 
 
-# ============================================
-#   LINEGPT：Token 取得 + 訊息/影像傳送（企業級）
-# ============================================
-_token_cache = {"token": None, "expire_time": 0}
-_token_lock = threading.Lock()
-
-LINE_LOGIN_URL = "https://lineapi.pcbut.com.tw:888/api/account/login"
-LINE_NOTIFY_URL = "https://lineapi.pcbut.com.tw:888/api/notify-with-img"
-LINE_USERNAME = "utbot"
-LINE_PASSWORD = "mi2@admin5566"
-DEFAULT_CHAT_ID = "2F0177B1-2AB0-471B-9001-E40B134F4D0F"   # 測試群組
-
 
 # Force detection to use CPU
 device = "cpu"
@@ -1015,58 +1003,124 @@ def pose_model(model, frame, detections, model_name,landmark_box,landmark_boundi
     state["foreign_objects_flag"] = foreign_objects_flag
     state["hands_last_location"] = hands_last_location  #是否完成板料擺放其一的判斷依據
 
+
+#11/14 weikuo
+# =============================================================
+# 讀取 LineGPT Chat ID（支援多筆）
+# =============================================================
+def load_linegpt_chat_ids(file_path="LineGptChatRoomId.txt"):
+    chat_ids = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    chat_ids.append(line)
+        print(f"✔ 已載入 {len(chat_ids)} 個 LINEGPT chat_id：{chat_ids}")
+    except Exception as e:
+        print(f"❌ 無法讀取 chat_id 檔案：{e}")
+    return chat_ids
+
+# ✅ 測試程式碼放在函數定義之後
+print("=" * 60)
+print("🚀 程式開始執行...")
+print(f"📂 當前工作目錄：{os.getcwd()}")
+print(f"📋 檔案列表：{os.listdir('.')}")
+print("=" * 60)
+
+# ✅ 只載入一次
+LINEGPT_CHAT_IDS = load_linegpt_chat_ids()
+
+print("=" * 60)
+print(f"✅ LINEGPT_CHAT_IDS 載入結果：{LINEGPT_CHAT_IDS}")
+print(f"✅ 數量：{len(LINEGPT_CHAT_IDS)}")
+print("=" * 60)
+
+
+
+# =============================================================
+# 取得 LINEGPT Token（融合：Cache + Refresh + Thread-safe）
+# =============================================================
+
+# ===== 全域變數 =====
+_token_cache = {"token": None, "expire_time": 0}
+_token_lock = threading.Lock()   # 防止多 Thread 同時刷新 Token
+# ===== 基本設定 =====
+LINE_LOGIN_URL = "https://lineapi.pcbut.com.tw:888/api/account/login"
+LINE_NOTIFY_URL = "https://lineapi.pcbut.com.tw:888/api/notify-with-img"
+LINE_USERNAME = "utbot"
+LINE_PASSWORD = "mi2@admin5566"
+
 def get_line_token(force_refresh=False):
     global _token_cache
+
     now = time.time()
 
     with _token_lock:
-        if (not force_refresh 
-            and _token_cache["token"] 
+
+        # ---- Token 尚未過期 → 使用 Cache ----
+        if (not force_refresh
+            and _token_cache["token"]
             and now < _token_cache["expire_time"]):
             return _token_cache["token"]
 
+        # ---- Token 過期 → 重新登入 ----
         try:
             resp = requests.post(
                 LINE_LOGIN_URL,
                 json={"username": LINE_USERNAME, "password": LINE_PASSWORD},
                 verify=False,
-                timeout=(8,10)
+                timeout=(8, 10)
             )
 
             if resp.status_code == 200:
                 data = resp.json()
                 token = data.get("token")
 
+                if not token:
+                    print("❌ Token 回應缺少 token 欄位")
+                    return None
+
+                # 更新 Cache
                 _token_cache["token"] = token
                 _token_cache["expire_time"] = now + 3600 * 24 * 365
-                print("✔ LINEGPT Token 已更新")
+
+                print("✔ Token 已更新（Cache 生效）")
                 return token
-            
-            print("❌ LINEGPT Token 取得失敗")
+
+            print(f"❌ Login Token 失敗: {resp.status_code}")
+            return None
 
         except Exception as e:
-            print(f"❌ LINEGPT Token 例外：{e}")
+            print(f"❌ Token API 例外：{e}")
+            return None
 
-        return None
-
-def send_line_message(message, file_path=None, retries=3):
+# =============================================================
+# 傳送 LINEGPT 訊息到單一 chat_id（支援圖片）
+# =============================================================
+def send_line_message_to_chat(message, chat_id, file_path=None, retries=3):
 
     token = get_line_token()
     if not token:
-        print("❌ 無法取得 Token，放棄 LINEGPT 傳送")
+        print("❌ 無法取得 Token，放棄傳送")
+        return False
+
+    # ✅ 檢查檔案是否存在
+    if file_path and not os.path.exists(file_path):
+        print(f"❌ 檔案不存在：{file_path}")
         return False
 
     headers = {"Authorization": f"Bearer {token}"}
-    data = {"message": message, "chatId": DEFAULT_CHAT_ID}
+    data = {"message": message, "chatId": chat_id}
 
-    for attempt in range(1, retries+1):
+    for attempt in range(1, retries + 1):
         try:
             files = None
             if file_path and os.path.exists(file_path):
                 files = {
                     "file": (
                         os.path.basename(file_path),
-                        open(file_path,"rb"),
+                        open(file_path, "rb"),
                         "image/jpeg"
                     )
                 }
@@ -1077,11 +1131,11 @@ def send_line_message(message, file_path=None, retries=3):
                 data=data,
                 files=files,
                 verify=False,
-                timeout=(10,15)
+                timeout=(10, 15)
             )
 
-            if resp.status_code in (200,201):
-                print(f"✔ LINE GPT 已送出（attempt {attempt}）")
+            if resp.status_code in (200, 201):
+                print(f"✔ LINEGPT 已送出到 {chat_id}（attempt {attempt}）")
                 return True
 
             if resp.status_code == 401:
@@ -1090,193 +1144,267 @@ def send_line_message(message, file_path=None, retries=3):
                 headers = {"Authorization": f"Bearer {token}"}
                 continue
 
-            print(f"❌ LINE 回傳錯誤：{resp.status_code}")
+            print(f"❌ LINEGPT 回傳錯誤：{resp.status_code}")
             return False
 
         except Exception as e:
-            print(f"❌ LINE 發送例外：{e}")
+            print(f"❌ LINEGPT 例外：{e}")
 
         finally:
-            if file_path and files:
-                try: files["file"].close()
-                except: pass
+            if file_path and os.path.exists(file_path) and files:
+                try:
+                    files["file"].close()
+                except:
+                    pass
 
     return False
 
-def format_alert_message(location, feature, content):
-    now_str = time.strftime("%Y-%m-%d %H:%M:%S")
-
-    msg = f"""
-【影像辨識警報】
-📍 地點：{location}
-🕒 時間：{now_str}
-🧠 事件：{feature}
-📄 說明：{content}
-
-請相關單位立即確認。
-"""
-    return msg
 
 def send_alert(send_frame, camera_index, detections):
     """
-    發送警報整合版本：
-    - Screenshot
-    - 冷卻控管
-    - LINEGPT 通知（含圖片）
-    - EIP 上傳
+    發送警報的函數，處理偵測到的事件並與 API 進行互動。
+    detections 現在是一個包含字典的列表，每個字典包含 'xyxy', 'conf', 'cls'。
     """
 
-    current_time = time.time()
-    cooldown_updated_classes = set()
-    cls_buffer_cooldown_dections = []
+    # ✅ 在函數最開頭加這行
+    os.makedirs("images", exist_ok=True)
 
-    # ========== 1. 冷卻系統：判斷哪些事件可以警報 ==========
+    cooldown_updated_classes = set()  # 延後更新的冷卻清單
+
+    current_time = time.time()
+    cls_buffer_cooldown_dections = []
+    
+    #cls_buffer_cooldown = {}
     for box in detections:
         model_name = box["model"]
-
-        if model_name in ["imfrared_not_aligned", "stick_hand_process_wrong"]:
-            cls = int(box["cls"])
-        elif model_name in ["model_pose"]:
+        if model_name == "imfrared_not_aligned" or model_name == "stick_hand_process_wrong":
+            
+            cls = int(box['cls'])  # 取得類別索引
+        elif model_name == "model_pose" or model_name == "model_stick_hand":
             continue
         else:
-            cls = int(box["cls"])
-            confidence = float(box["conf"][0])
-
-        # 類別歸一化
+            confidence = float(box['conf'][0])
+            cls = int(box['cls'])  # 取得類別索引
+        
         if model_name == "model_no_gloves":
-            cls = 3 if cls == 0 else 4
+            if cls == 0:
+                cls = 3
+            else:
+                cls = 4
+        # if model_name == "cellphone":
+        #     cls = 4
         if model_name == "model_fall":
             cls = 2
         if model_name == "model_fire_smoke":
-            cls = 0 if cls == 0 else 1
+            if cls == 0:
+                cls = 0
+            else:
+                cls = 1
         if model_name == "model_foreign_objects":
             cls = 6
-        if model_name == "stick_hand_process_wrong":
-            cls = 8
 
+        # 取得該類別的冷卻時間
         cooldown_time = class_alert_cooldowns.get(cls, 300)
-
+        # 初始化該類別的警報時間
         if cls not in last_alert_times[str(camera_index)]:
             last_alert_times[str(camera_index)][cls] = 0
 
-        # 在冷卻內 → skip
         if (current_time - last_alert_times[str(camera_index)][cls]) <= cooldown_time:
             continue
 
-        # CCC：超過冷卻時間 → 加入可警報清單
-        cls_buffer_cooldown_dections.append(box)
+        if current_time - last_alert_times[str(camera_index)][cls] > cooldown_time:
+            # last_alert_times[str(camera_index)][cls] = current_time
+            # print(f"Sending alert for camera {camera_index} to API!")
+
+            if model_name == "model_no_gloves":
+                if cls == 3:
+                    box["cls"] = 3
+                    cls_buffer_cooldown_dections.append(box)
+                    event_name_en = class_event_mapping_en.get(3, "Unknown Event")
+            # if model_name == "cellphone":
+            #     event_name_en = class_event_mapping_en.get(4, "Unknown Event")
+            if model_name == "model_fall":
+                box["cls"] = 2
+                cls_buffer_cooldown_dections.append(box)
+                event_name_en = class_event_mapping_en.get(2, "Unknown Event")
+            if model_name == "model_fire_smoke":
+                if cls == 0:
+                    box["cls"] = 0
+                    cls_buffer_cooldown_dections.append(box)
+                    event_name_en = class_event_mapping_en.get(0, "Unknown Event")
+                elif cls == 1:
+                    box["cls"] = 1
+                    cls_buffer_cooldown_dections.append(box)
+                    event_name_en = class_event_mapping_en.get(1, "Unknown Event")
+            if model_name == "imfrared_not_aligned":
+                box["cls"] = 5
+                cls_buffer_cooldown_dections.append(box)
+            if model_name == "model_foreign_objects":
+                box["cls"] = 6
+                cls_buffer_cooldown_dections.append(box)
+                event_name_en = class_event_mapping_en.get(6, "Unknown Event")
+            if model_name == "stick_hand_process_wrong":
+                box["cls"] = 8
+                cls_buffer_cooldown_dections.append(box)
+
+        if (model_name != "model_pose") and ( model_name != "imfrared_not_aligned") and ( model_name != "stick_hand_process_wrong"):
+            if cls != 4:
+                x1, y1, x2, y2 = box['xyxy']
+                cv2.rectangle(send_frame, (x1, y1), (x2, y2), color_dict[cls], 10)
+                label = f'{event_name_en} {confidence:.2f}'
+                cv2.putText(send_frame, label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2, color_dict[cls], 10)
+        # ✅ 延遲更新冷卻時間
         cooldown_updated_classes.add(cls)
 
-    # ========== 2. 更新冷卻時間 ==========
+def send_alert(send_frame, camera_index, detections):
+    """
+    發送警報的函數，處理偵測到的事件並與 API 進行互動。
+    detections 現在是一個包含字典的列表，每個字典包含 'xyxy', 'conf', 'cls'。
+    """
+    # ✅ 在函數最開頭加這行
+    os.makedirs("images", exist_ok=True)
+    
+    cooldown_updated_classes = set()  # 延後更新的冷卻清單
+
+    current_time = time.time()
+    cls_buffer_cooldown_dections = []
+    
+    # ... 中間的 for box in detections 迴圈 ...
+    # ... 一直到 cooldown_updated_classes.add(cls) ...
+    
+    # ✅ 統一寫入冷卻時間
     for cls in cooldown_updated_classes:
         last_alert_times[str(camera_index)][cls] = current_time
+    
+    if cls_buffer_cooldown_dections:    
+        for box in cls_buffer_cooldown_dections:
+            model_name = box["model"]
+            if model_name == "imfrared_not_aligned" or model_name == "stick_hand_process_wrong":
+                cls = int(box['cls'])
+            elif model_name == "model_pose":
+                continue
+            else:
+                confidence = float(box['conf'][0])
+                cls = int(box['cls'])
+    
+            # ✅ 先定義 location（在這裡！）
+            if camera_index == "501003" or camera_index == "501004" or camera_index == "501007" or camera_index == "501008" or camera_index == "501011" or camera_index == "501012" or camera_index == "501015" or camera_index == "501016":
+                location = "十二課疊合室"
+            else:
+                location = f"未知位置"
 
-    # 無可警報事件 → 不做事
-    if not cls_buffer_cooldown_dections:
-        return
+            # 格式化檔名為 "1-2024-12-12_17-53-11.jpg"
+            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            formatted_filename = f"{camera_index}-{timestamp}.jpg"
+            
+            # 格式化檔名為 "1-2024-12-12_17-53-11.jpg"
+            timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+            formatted_filename = f"{camera_index}-{timestamp}.jpg"
+            
+            # ✅ 修改這個區塊（保存警報截圖）
+            if model_name == "imfrared_not_aligned":
+                red_frame = box["detected_frame"]
+                success = cv2.imwrite(f"images/{formatted_filename}", red_frame)
+            elif model_name == "stick_hand_process_wrong":
+                stick_hand_process_frame = box["process_wrong_frame"]
+                success = cv2.imwrite(f"images/{formatted_filename}", stick_hand_process_frame)
+            elif model_name == "model_pose":
+                continue
+            else:
+                success = cv2.imwrite(f"images/{formatted_filename}", send_frame)
+            
+            # ✅ 修改這個區塊（檢查保存結果）
+            if success:
+                print(f"✔ Saved screenshot: {formatted_filename}")
+            else:
+                print(f"❌ Screenshot failed: {formatted_filename}")
+                continue  # ✅ 保存失敗就跳過後續處理（這行很重要！）
 
-    # ========== 3. 決定地點名稱（你現有的邏輯） ==========
-    if camera_index in ["501003","501004","501007","501008","501011","501012","501015","501016"]:
-        location = "十二課疊合室"
-    else:
-        location = "未知位置"
-
-    # ========== 4. Screenshot 寫入 ==========
-    timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-    formatted_filename = f"{camera_index}-{timestamp}.jpg"
-    full_path = f"images/{formatted_filename}"
-
-    # 如果是特殊模型 → 用 model 提供的 frame
-    first_box = cls_buffer_cooldown_dections[0]
-    model_name = first_box["model"]
-
-    if model_name == "imfrared_not_aligned":
-        screenshot_frame = first_box["detected_frame"]
-    elif model_name == "stick_hand_process_wrong":
-        screenshot_frame = first_box["process_wrong_frame"]
-    else:
-        screenshot_frame = send_frame
+            # 準備 API 請求的數據（使用中文事件名稱）
+            api_url = "https://eip.pcbut.com.tw/File/UploadYoloImage"
+            
+                    
+            #join_cls = int(box['cls'][0])
+            event_names = []
 
 
-     # ===== Screenshot Frame 決定邏輯：確保不為 None =====
-    first_box = cls_buffer_cooldown_dections[0]
-    model_name = first_box["model"]
+            if model_name == "model_no_gloves":
+                event_name_cn = class_event_mapping_cn.get(3, "Unknown Event")
+            # if model_name == "cellphone":
+            #     event_name_cn = class_event_mapping_cn.get(4, "Unknown Event")
+            if model_name == "model_fall":
+                event_name_cn = class_event_mapping_cn.get(2, "Unknown Event")
+            if model_name == "model_fire_smoke":
+                if cls == 0:
+                    event_name_cn = class_event_mapping_cn.get(0, "Unknown Event")
+                else:
+                    event_name_cn = class_event_mapping_cn.get(1, "Unknown Event")
+                    #event_name = class_event_mapping_cn.get(int(box['cls'][0]), "未知事件")
+            if model_name == "imfrared_not_aligned":
+                event_name_cn = class_event_mapping_cn.get(5, "Unknown Event")
+            if model_name == "model_foreign_objects":
+                event_name_cn = class_event_mapping_cn.get(6, "Unknown Event")
+            if model_name == "stick_hand_process_wrong":
+                event_name_cn = class_event_mapping_cn.get(8, "Unknown Event")
 
-    screenshot_frame = send_frame
 
-    if model_name == "imfrared_not_aligned":
-        screenshot_frame = first_box.get("detected_frame", screenshot_frame)
+            event_names.append(event_name_cn)
+            print(event_names)
+            formatted_event_name = "；".join(event_names)
 
-    elif model_name == "stick_hand_process_wrong":
-        screenshot_frame = first_box.get("process_wrong_frame", screenshot_frame)
+            
+            camera_model = {
+                "cameraId": camera_index,
+                "location": location,
+                "eventName": formatted_event_name,
+                "eventDate": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "notes": f"{len(detections)} events detected with confidence > {alert_threshold}",
+                "fileName": formatted_filename,
+                "result": f"疑似發生 {formatted_event_name}, 請同仁儘速查看"
+            }
 
-    if screenshot_frame is None:
-        print("🟥 Screenshot Frame 是 None，無法截圖，略過本次事件")
-        return
-    # ======================================================
 
-    # ===== Screenshot 寫檔 =====
-    success = cv2.imwrite(full_path, screenshot_frame)
+            # 發送包含影像和攝影機數據的 POST 請求
+            # "D:/My Documents/vincent-shiu/桌面/ENIG/images/"+
+            
+                # ========== LINEGPT 通知 ==========
+            try:
+                alert_msg = f"[警報] 攝影機 {camera_index} 偵測到：{formatted_event_name}"
 
-    if success:
-        print(f"📸 Screenshot saved: {formatted_filename}")
-    else:
-        print(f"❌ Screenshot failed: {formatted_filename}")
+                image_path = f"images/{formatted_filename}"
 
-    # ========== 5. 產生事件中文名稱 ==========
-    event_names = []
-    for box in cls_buffer_cooldown_dections:
-        event_names.append(class_event_mapping_cn.get(box["cls"], "未知事件"))
+                # 多 chat_id 通知
+                for chat_id in LINEGPT_CHAT_IDS:
+                    threading.Thread(
+                        target=send_line_message_to_chat,
+                        args=(alert_msg, chat_id, image_path),
+                        daemon=True
+                    ).start()
 
-    formatted_event_name = "；".join(event_names)
+                print(f"✔ LINEGPT 已通知所有 chat_id：{LINEGPT_CHAT_IDS}")
 
-    # =========================================================
-    #                  🚀 6. LINEGPT 警報通知
-    # =========================================================
-    try:
-        alert_msg = format_alert_message(
-            location=location,
-            feature=formatted_event_name,
-            content=f"攝影機 {camera_index} 偵測到：{formatted_event_name}"
-        )
+            except Exception as e:
+                print(f"❌ LINEGPT 發送例外：{e}")
 
-        send_line_message(
-            alert_msg,
-            file_path=full_path
-        )
 
-        print(f"✔ LINEGPT 已通知：{formatted_filename}")
 
-    except Exception as e:
-        print(f"❌ LINEGPT 發送例外：{e}")
 
-    # =========================================================
-    #                  🚀 7. EIP 上傳（你的原本邏輯）
-    # =========================================================
-    api_url = "https://eip.pcbut.com.tw/File/UploadYoloImage"
+            try:
+                with open(f"images/{formatted_filename}", 'rb') as img_file:
+                    files = {'files': (formatted_filename, img_file, 'image/jpeg')}
+                    response = requests.post(api_url, files=files, data=camera_model, verify=False)
 
-    camera_model = {
-        "cameraId": camera_index,
-        "location": location,
-        "eventName": formatted_event_name,
-        "eventDate": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "notes": f"{len(cls_buffer_cooldown_dections)} events detected",
-        "fileName": formatted_filename,
-        "result": f"疑似發生 {formatted_event_name}, 請同仁儘速查看"
-    }
+                if response.status_code == 200:
+                    print(f"Successfully sent alert for camera {camera_index}. Response: {response.text}")
 
-    try:
-        with open(full_path, "rb") as img_file:
-            files = {"files": (formatted_filename, img_file, "image/jpeg")}
-            response = requests.post(api_url, files=files, data=camera_model, verify=False)
+                else:
+                    print(f"Failed to send alert for camera {camera_index}. Status Code: {response.status_code}, Response: {response.text}")
+                            
 
-        if response.status_code == 200:
-            print(f"✔ EIP 上傳成功：{formatted_filename}")
-        else:
-            print(f"❌ EIP 回傳：{response.status_code}, {response.text}")
-
-    except Exception as e:
-        print(f"❌ EIP 上傳例外：{e}")
+            except Exception as e:
+                print(f"Error sending alert for camera {camera_index}: {e}")
+    #print(last_alert_times)
 
 # Global stop event for all threads
 stop_event = threading.Event()
